@@ -1,0 +1,62 @@
+# ---- Build stage: build a reproducable venv from lock-pinned sources ----
+
+FROM python:3.13-slim AS builder
+
+# Install build-time C deps (note: postgresql-dev is pulled in by `asyncpg` at
+# install time on the builder image, not required at runtime).
+RUN apt-get update -q && \
+    apt-get install -y --no-install-recommends \
+        build-essential pkg-config libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY pyproject.toml README.md LICENSE.md ./
+
+# Build a clean, flagged virtualenv so the image is fully reproducible and
+# offline-capable. We pin the *exact* runtime + dev wheel set rather than
+# re-resolving from the index at build time.
+COPY uv.toml ./
+COPY uv.lock ./
+RUN --mount=type=cache,id=uv,target=/root/.cache/uv \
+    pipx install --quiet uv==0.9.1 && \
+    uv venv .venv --python 3.13 --seed --quiet && \
+    uv pip install --python .venv/bin/python \
+        --no-header --no-progress --disable-pip-version-check \
+        -e ./ --quiet
+
+# ---- Runtime image ----
+
+FROM python:3.13-slim
+
+# POSIX timezone so logs / scheduling are interpretable without a TZ var.
+RUN ln -snf /usr/share/zoneinfo/UTC /etc/localtime && \
+    echo "UTC" > /etc/timezone && \
+    apt-get update -q && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV APP_ENV=production \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Copy only the built venv + app sources. Tests/docs are intentionally left out
+# of the production image so they cannot be used to introspect internals.
+COPY --from=builder /src/.venv /app/.venv
+COPY app /app/app
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH=/app
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
+
+# Default process is the app itself; override at runtime with `docker run` if
+# you need a shell (e.g. for debugging the venv).
+CMD ["uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", "--port", "8000", \
+     "--no-access-log", "--log-level", "info"]
