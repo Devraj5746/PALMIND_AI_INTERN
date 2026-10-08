@@ -1,5 +1,5 @@
 [project]
-name = "techkraft-rag-backend"
+name = "rag-backend"
 version = "1.0.0"
 description = "Document ingestion + conversational RAG backend (FastAPI, Qdrant, Redis, SQL) with LLM-driven interview booking."
 readme = "README.md"
@@ -60,7 +60,7 @@ dev = [
 # lags the library and would shadow the authoritative types.
 
 [project.urls]
-Repository = "https://github.com/your-username/techkraft-rag-backend"
+Repository = "https://github.com/your-username/rag-backend"
 
 [build-system]
 requires = ["hatchling"]

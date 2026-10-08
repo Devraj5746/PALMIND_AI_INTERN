@@ -2,26 +2,25 @@
 
 FROM python:3.13-slim AS builder
 
-# Install build-time C deps (note: postgresql-dev is pulled in by `asyncpg` at
-# install time on the builder image, not required at runtime).
-RUN apt-get update -q && \
-    apt-get install -y --no-install-recommends \
-        build-essential pkg-config libpq-dev && \
-    rm -rf /var/lib/apt/lists/*
+# No C toolchain here on purpose: every locked runtime dependency resolves to a
+# prebuilt manylinux wheel for CPython 3.13, so no compiler is needed.  (If a
+# dependency ever loses wheel coverage, this stage fails loudly at build time
+# instead of silently needing gcc.)
 
-WORKDIR /src
-COPY pyproject.toml README.md LICENSE.md ./
-
-# Build a clean, flagged virtualenv so the image is fully reproducible and
-# offline-capable. We pin the *exact* runtime + dev wheel set rather than
-# re-resolving from the index at build time.
-COPY uv.toml ./
-COPY uv.lock ./
+# NOTE: the venv must be created at the *runtime* path (/app/.venv), not at the
+# build path.  Console scripts (uvicorn, fastapi, ...) embed an absolute shebang
+# pointing at the interpreter used to install them; building under /src and then
+# copying to /app/.venv leaves every script executing `#!/src/.venv/bin/python`,
+# which the kernel reports as "no such file or directory" (exit 255).
+WORKDIR /app
+COPY pyproject.toml README.md uv.lock ./
+COPY app ./app
+# `--seed` is deliberately omitted: pip/setuptools/virtualenv-vendored tooling
+# are never used inside this image, they would only add weight to /app/.venv.
 RUN --mount=type=cache,id=uv,target=/root/.cache/uv \
-    pipx install --quiet uv==0.9.1 && \
-    uv venv .venv --python 3.13 --seed --quiet && \
-    uv pip install --python .venv/bin/python \
-        --no-header --no-progress --disable-pip-version-check \
+    pip install --no-cache-dir uv==0.9.1 && \
+    uv venv /app/.venv --python 3.13 --quiet && \
+    uv pip install --python /app/.venv/bin/python \
         -e ./ --quiet
 
 # ---- Runtime image ----
@@ -44,16 +43,20 @@ WORKDIR /app
 
 # Copy only the built venv + app sources. Tests/docs are intentionally left out
 # of the production image so they cannot be used to introspect internals.
-COPY --from=builder /src/.venv /app/.venv
+COPY --from=builder /app/.venv /app/.venv
 COPY app /app/app
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH=/app
 
+# Fail the build (rather than every container start) if the interpreter the
+# entry-point scripts point at, or the app package, is not importable here.
+RUN /app/.venv/bin/python -c "import uvicorn, app.main"
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
+  CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
 # Default process is the app itself; override at runtime with `docker run` if
 # you need a shell (e.g. for debugging the venv).
